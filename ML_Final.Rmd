@@ -1,0 +1,255 @@
+---
+title: "Machine Learning Final Project"
+author: "Leah Mautner"
+date: "2025-04-22"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(ggplot2)
+library(stringr)
+library(knitr)
+```
+
+# Import df
+```{r}
+library(readr)
+data <- read_csv("/Users/leahmautner/Desktop/Coding Data:Keys/Machine Learning/mxmh_survey_results.csv")
+```
+# Data cleaning 
+```{r}
+data <- data %>% select(-Timestamp, -Permissions)
+
+data <- data %>% mutate(across(c(`Primary streaming service`, `While working`, Instrumentalist, Composer, `Fav genre`, Exploratory, `Foreign languages`, `Music effects`), as.factor)) 
+
+str(data)
+
+#Missing data 
+sum(is.na(data)) #N= 129
+
+data %>% summarise(across(everything(), ~ sum(is.na(.)))) #107/129 NA is in BPM*
+
+data_ <- data %>% drop_na()
+str(data_) #NA= 0
+```
+
+# Outcome 
+```{r}
+table(data_$Depression) #total N= 736
+hist(data_$Depression)
+sum(is.na(data_$Depression)) #missing N=0
+```
+
+# Predictor
+```{r}
+likert <- c("Never", "Rarely", "Sometimes", "Very frequently")
+
+names(data_)[startsWith(names(data_), "Frequency")] <- gsub(" ", "_", gsub(".*\\[|\\]", "", names(data_)[startsWith(names(data_), "Frequency")]))
+
+genres <- c("Classical", "Country", "EDM", "Folk", "Gospel", "Hip_hop", "Jazz", "K_pop", "Latin", "Lofi", "Metal", "Pop", "R&B", "Rap", "Rock", "Video_game_music")
+
+data_[genres] <- lapply(data_[genres], factor, levels = likert, ordered = TRUE)
+
+sum(is.na(genres))
+```
+
+
+# Overall music preferences in sample
+```{r}
+long <- data_ %>% select(all_of(genres)) %>% pivot_longer(cols = everything(), names_to = "Genre", values_to = "Frequency") 
+
+#Table 
+long %>% group_by(Genre) %>% mutate(Frequency = as.numeric(Frequency)) %>% summarise(mean = round(mean(Frequency, na.rm= TRUE), 2))
+
+#Visualize
+ggplot(long, aes(x = Genre)) + geom_bar(fill = "blue") + facet_wrap(~ Frequency, ncol = 2) + theme_minimal() + labs(x = "Genre", y = "Number of Responses", title = "Music Preferences in Overall Sample") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+# Split data
+```{r}
+data_$`Fav genre` <- factor(data_$`Fav genre`)
+
+set.seed(0)
+tr_ind <- sample(1:nrow(data_), size = 0.7 * nrow(data_))
+train_data <- data_[tr_ind, ]
+test_data <- data_[-tr_ind, ]
+```
+
+
+# Standard Linear Regression (full model)
+```{r}
+full_model <- lm(Depression ~ ., data= train_data)
+summary(full_model)
+
+#Train error
+tr_pred <- predict(full_model, newdata = train_data)
+tr_error <- mean((tr_pred - train_data$Depression)^2)
+tr_error
+
+#Test error
+te_pred <- predict(full_model, newdata = test_data)
+te_error <- mean((te_pred - test_data$Depression)^2)
+te_error
+```
+# Standard Linear Regression (only depression and genres + BPM)
+```{r}
+reduced_model <- lm(Depression ~ Instrumentalist + Composer + BPM + Classical + Country + EDM + Folk + Gospel + Hip_hop + Jazz + K_pop + Latin + Lofi + Metal + Pop + `R&B` + Rap + Rock + Video_game_music + `Music effects`, data = train_data)
+summary(reduced_model)
+
+#Train error
+tr_pred <- predict(reduced_model, newdata = train_data)
+tr_error <- mean((tr_pred - train_data$Depression)^2)
+tr_error
+
+#Test error
+te_pred <- predict(reduced_model, newdata = test_data)
+te_error <- mean((te_pred - test_data$Depression)^2)
+te_error
+```
+
+# Best subset selection (Return with time to run exhaustive*!)
+```{r, eval=FALSE}
+library(leaps)
+
+subset <- regsubsets(Depression ~ ., data=train_data, nvmax=30)
+subset_summary <- summary(subset)
+
+size_seq <- subset_sum$bic
+
+best_bic <- which.min(subset_sum$bic)
+best_coef <- coef(subset, best_bic)
+best_bic
+best_coef
+
+# Train error
+train_x <- train_data %>% select(names(best_coef)[-1])
+train_pred <- cbind(1, as.matrix(test_x)) %*% best_coef
+train_error <- mean((train_pred - train_data$Depression)^2)
+train_error
+
+# Test error
+test_x <- test_data %>% select(names(best_coef)[-1])
+test_pred <- cbind(1, as.matrix(test_x)) %*% best_coef
+test_error <- mean((test_pred - test_data$Depression)^2)
+test_error
+```
+
+# Regularized Linear Regression
+```{r}
+# Ridge 
+library(glmnet)
+library(caret)
+
+set.seed(0)
+x_tr <- as.matrix(train_data[, -c(27:30)])
+y_tr <- train_data$Depression
+x_te <- as.matrix(test_data[, -c(27:30)])
+y_te <- test_data$Depression
+
+cv_ridge <- cv.glmnet(x_tr, y_tr, alpha= 0, nfolds=10)
+cv_ridge 
+coef(cv_ridge)
+
+#Train error
+tr_pred <- predict(cv_ridge, newx=x_tr)
+tr_error <- mean((tr_pred - y_tr)^2)
+tr_error
+
+#Test error
+te_pred <- predict(cv_ridge, newx=x_te)
+te_error <- mean((te_pred - y_te)^2)
+te_error
+
+#Lasso
+set.seed(1)
+cv_lasso <- cv.glmnet(x_tr, y_tr, alpha=1, nfolds=10)
+cv_lasso
+coef(cv_lasso)
+
+#Train error
+tr_pred <- predict(cv_lasso, newx=x_tr)
+tr_error <- mean((tr_pred - y_tr)^2)
+tr_error
+
+#Test error
+te_pred <- predict(cv_lasso, newx=x_te)
+te_error <- mean((te_pred - y_te)^2)
+te_error
+```
+
+# Decision Tree 
+```{r}
+library(tree)
+
+#Resolving issues with defined columns
+train_data2 <- train_data %>% select(Depression, everything(), -Anxiety, -OCD, -Insomnia)
+test_data2  <- test_data  %>% select(Depression, everything(), -Anxiety, -OCD, -Insomnia)
+
+names(train_data2) <- gsub("[^A-Za-z0-9]", "_", names(train_data2))
+names(test_data2)  <- gsub("[^A-Za-z0-9]", "_", names(test_data2))
+
+
+my_control <- tree.control(nrow(train_data2))
+
+fit <- tree(Depression ~ ., data = train_data2, control = my_control)
+
+#Pruning
+nodes <- 2:22
+train_errors <- numeric(length(nodes))
+test_errors <- numeric(length(nodes))
+
+for (i in seq_along(nodes)) {
+  pruned_tree <- prune.tree(fit, best=nodes[i])
+  
+  train_pred <- predict(pruned_tree, newdata = train_data2)
+  train_errors[i] <- mean((train_pred - train_data2$Depression)^2)
+  
+  test_pred <- predict(pruned_tree, newdata = test_data2)
+  test_errors[i] <- mean((test_pred - test_data2$Depression)^2)
+}
+
+subtrees <- data.frame(
+  Subtree= nodes,
+  Training= train_errors,
+  Prediction= test_errors
+)
+
+ggplot(subtrees, aes(x = Subtree)) +
+  geom_line(aes(y = Training, color = "Training Error")) +
+  geom_line(aes(y = Prediction, color = "Test Error")) + labs(
+    title = "Training and Prediction Errors vs. Subtree Size",
+    x = "Number of Terminal Nodes (Subtree Size)",
+    y = "Error"
+  ) 
+```
+
+
+
+```{r, eval= FALSE}
+# Optimal fit -- this did not work because optimal was a stump, go back*
+fit <- tree(Depression ~ ., 
+            control = my_control,
+            data = train_data2)
+
+set.seed(0)
+cv.fit <- cv.tree(fit)
+cv.fit_df <- data.frame(size=cv.fit$size, deviance=cv.fit$dev)
+min_deviance <- min(cv.fit$dev)
+best_size <- min(cv.fit$size[cv.fit$dev == min_deviance])
+print(best_size)
+
+ggplot(cv.fit_df, mapping=aes(x=size, y=deviance)) + geom_point(size=3) + geom_line() +
+  geom_vline(xintercept = best_size, col = "red")
+
+fit_final <- prune.tree(fit, best=best_size)
+plot(fit_final, type= "uniform")
+text(fit_final)
+```
+
+
+
+
+
+
